@@ -534,14 +534,41 @@ namespace {
     static_assert(NNUE_SFNN_ROUTER_MODE == NNUE_SFNN_ROUTER_MODE_NONE || NNUE_SFNN_ROUTER_N >= 1,
         "NNUE_SFNN_ROUTER_N must be >= 1 when router is enabled");
     // routerkpabsではNNUE_SFNN_ROUTER_Nがそのままbucket数、routerft<R>ft<R>ではR*R。
-    // wsb (NNUE_SFNN_USE_SHARED_BUCKET) は選択方式に関わらず常に評価される共有バケット
-    // を末尾に1個追加するので、積の後に+1する。
-    static_assert(kLayerStacks == NNUE_SFNN_HAND_BUCKETS * NNUE_SFNN_KING_BUCKETS * NNUE_SFNN_PROGRESS_BUCKETS
+    static_assert(NNUE_SFNN_SELECTABLE_BUCKETS == NNUE_SFNN_HAND_BUCKETS * NNUE_SFNN_KING_BUCKETS
+        * NNUE_SFNN_PROGRESS_BUCKETS
         * (NNUE_SFNN_ROUTER_MODE == NNUE_SFNN_ROUTER_MODE_KPABS ? NNUE_SFNN_ROUTER_N
            : NNUE_SFNN_ROUTER_MODE == NNUE_SFNN_ROUTER_MODE_FTFT ? NNUE_SFNN_ROUTER_N * NNUE_SFNN_ROUTER_N
-           : 1)
-        + (NNUE_SFNN_USE_SHARED_BUCKET ? 1 : 0),
-        "LayerStacks must match the SFNN bucket product (hand * king * progress * router, router last) plus 1 when wsb is enabled");
+           : 1),
+        "NNUE_SFNN_SELECTABLE_BUCKETS must match the SFNN bucket product (hand * king * progress * router)");
+    // NNUE_SFNN_ORDER_HAND/KING/PROGRESS/ROUTER は合成順序 (0=最上位桁..3=最下位桁) の
+    // ランクを表すので、{0,1,2,3} の順列でなければならない。
+    static_assert(NNUE_SFNN_ORDER_HAND + NNUE_SFNN_ORDER_KING + NNUE_SFNN_ORDER_PROGRESS
+        + NNUE_SFNN_ORDER_ROUTER == 0 + 1 + 2 + 3
+        && NNUE_SFNN_ORDER_HAND >= 0 && NNUE_SFNN_ORDER_HAND <= 3
+        && NNUE_SFNN_ORDER_KING >= 0 && NNUE_SFNN_ORDER_KING <= 3
+        && NNUE_SFNN_ORDER_PROGRESS >= 0 && NNUE_SFNN_ORDER_PROGRESS <= 3
+        && NNUE_SFNN_ORDER_ROUTER >= 0 && NNUE_SFNN_ORDER_ROUTER <= 3
+        && NNUE_SFNN_ORDER_HAND != NNUE_SFNN_ORDER_KING
+        && NNUE_SFNN_ORDER_HAND != NNUE_SFNN_ORDER_PROGRESS
+        && NNUE_SFNN_ORDER_HAND != NNUE_SFNN_ORDER_ROUTER
+        && NNUE_SFNN_ORDER_KING != NNUE_SFNN_ORDER_PROGRESS
+        && NNUE_SFNN_ORDER_KING != NNUE_SFNN_ORDER_ROUTER
+        && NNUE_SFNN_ORDER_PROGRESS != NNUE_SFNN_ORDER_ROUTER,
+        "NNUE_SFNN_ORDER_HAND/KING/PROGRESS/ROUTER must be a permutation of {0,1,2,3}");
+    // wsb (NNUE_SFNN_USE_SHARED_BUCKET) が有効なとき、「wsb の直前カテゴリ以降」の
+    // ブロック (選択バケット数 NNUE_SFNN_SHARED_BUCKET_INNER 個) が
+    // (NNUE_SFNN_SELECTABLE_BUCKETS / NNUE_SFNN_SHARED_BUCKET_INNER) 個並び、
+    // 各ブロックに共有バケットが1個ずつ挿入される。無効なら選択バケットのみ。
+    static_assert(!NNUE_SFNN_USE_SHARED_BUCKET
+        || NNUE_SFNN_SELECTABLE_BUCKETS % NNUE_SFNN_SHARED_BUCKET_INNER == 0,
+        "NNUE_SFNN_SHARED_BUCKET_INNER must evenly divide NNUE_SFNN_SELECTABLE_BUCKETS");
+    static_assert(kLayerStacks == (NNUE_SFNN_USE_SHARED_BUCKET
+        ? (NNUE_SFNN_SELECTABLE_BUCKETS / NNUE_SFNN_SHARED_BUCKET_INNER)
+              * (NNUE_SFNN_SHARED_BUCKET_INNER + 1)
+        : NNUE_SFNN_SELECTABLE_BUCKETS),
+        "LayerStacks must match NNUE_SFNN_SELECTABLE_BUCKETS, or "
+        "(NNUE_SFNN_SELECTABLE_BUCKETS / NNUE_SFNN_SHARED_BUCKET_INNER) * (NNUE_SFNN_SHARED_BUCKET_INNER + 1) "
+        "when wsb is enabled");
 
     // レイヤースタックの選択。双方の玉の段に応じて9通りに分岐させる。
     static int king3_by_king3_bucket(const Position& pos) {
@@ -805,62 +832,85 @@ namespace {
     }
 #endif
 
-    // 選択バケット (0..kBaseBuckets-1) の個数。wsb有効時は共有バケット (末尾1個) を
-    // 含まないので kLayerStacks - 1、無効時は kLayerStacks そのもの。
-#if NNUE_SFNN_USE_SHARED_BUCKET
-    static constexpr int kBaseBuckets = kLayerStacks - 1;
-#else
-    static constexpr int kBaseBuckets = kLayerStacks;
-#endif
-
     static int stack_index_for_nnue(const Position& pos) {
 #if NNUE_SFNN_HAND_BUCKETS == 1 && NNUE_SFNN_KING_BUCKETS == 9 && NNUE_SFNN_KING_BUCKET_TYPE == NNUE_SFNN_KING_BUCKET_TYPE_K3K3 && NNUE_SFNN_PROGRESS_BUCKETS == 1 && NNUE_SFNN_ROUTER_MODE == NNUE_SFNN_ROUTER_MODE_NONE && !NNUE_SFNN_USE_SHARED_BUCKET
+        // カテゴリがking (k3k3) だけの、もっとも一般的なケース専用の近道。
+        // カテゴリが1つしか無いので合成順序 (NNUE_SFNN_ORDER_*) は関係ない。
         return king3_by_king3_bucket(pos);
 #else
-        int idx = 0;
+        // 各カテゴリの (バケット数, このバケットのindex) を求め、`NNUE_SFNN_ORDER_*`
+        // (合成順序、0=最上位桁 .. 3=最下位桁) に従って並べてから
+        // `idx = idx * count + index` で合成する (使われていないカテゴリは
+        // count=1, index=0 になるだけで、合成結果に影響しない)。
+        struct BucketDigit {
+            int count;
+            int index;
+        };
+        BucketDigit digits[4] = {};
 
 #if NNUE_SFNN_HAND_BUCKET_TYPE == NNUE_SFNN_HAND_BUCKET_TYPE_HAND4
-        idx = hand4_bucket(pos);
+        digits[NNUE_SFNN_ORDER_HAND] = {4, hand4_bucket(pos)};
 #elif NNUE_SFNN_HAND_BUCKET_TYPE == NNUE_SFNN_HAND_BUCKET_TYPE_HAND16
-        idx = hand16_bucket(pos);
+        digits[NNUE_SFNN_ORDER_HAND] = {16, hand16_bucket(pos)};
 #elif NNUE_SFNN_HAND_BUCKET_TYPE == NNUE_SFNN_HAND_BUCKET_TYPE_HAND64
-        idx = hand64_bucket(pos);
+        digits[NNUE_SFNN_ORDER_HAND] = {64, hand64_bucket(pos)};
 #elif NNUE_SFNN_HAND_BUCKET_TYPE == NNUE_SFNN_HAND_BUCKET_TYPE_HAND64Z
-        idx = hand64z_bucket(pos);
+        digits[NNUE_SFNN_ORDER_HAND] = {64, hand64z_bucket(pos)};
 #elif NNUE_SFNN_HAND_BUCKET_TYPE == NNUE_SFNN_HAND_BUCKET_TYPE_HAND256
-        idx = hand256_bucket(pos);
+        digits[NNUE_SFNN_ORDER_HAND] = {256, hand256_bucket(pos)};
 #elif NNUE_SFNN_HAND_BUCKET_TYPE == NNUE_SFNN_HAND_BUCKET_TYPE_HAND1024
-        idx = hand1024_bucket(pos);
+        digits[NNUE_SFNN_ORDER_HAND] = {1024, hand1024_bucket(pos)};
+#else
+        digits[NNUE_SFNN_ORDER_HAND] = {1, 0};
 #endif
 
 #if NNUE_SFNN_KING_BUCKET_TYPE == NNUE_SFNN_KING_BUCKET_TYPE_K3K3
-        idx = idx * 9 + king3_by_king3_bucket(pos);
+        digits[NNUE_SFNN_ORDER_KING] = {9, king3_by_king3_bucket(pos)};
 #elif NNUE_SFNN_KING_BUCKET_TYPE == NNUE_SFNN_KING_BUCKET_TYPE_K9K9
-        idx = idx * 81 + king9_by_king9_bucket(pos);
+        digits[NNUE_SFNN_ORDER_KING] = {81, king9_by_king9_bucket(pos)};
 #elif NNUE_SFNN_KING_BUCKET_TYPE == NNUE_SFNN_KING_BUCKET_TYPE_K9K9Z
-        idx = idx * 81 + king9_zone_by_king9_zone_bucket(pos);
+        digits[NNUE_SFNN_ORDER_KING] = {81, king9_zone_by_king9_zone_bucket(pos)};
 #elif NNUE_SFNN_KING_BUCKET_TYPE == NNUE_SFNN_KING_BUCKET_TYPE_K13K13Z
-        idx = idx * 169 + king13_zone_by_king13_zone_bucket(pos);
+        digits[NNUE_SFNN_ORDER_KING] = {169, king13_zone_by_king13_zone_bucket(pos)};
 #elif NNUE_SFNN_KING_BUCKET_TYPE == NNUE_SFNN_KING_BUCKET_TYPE_K21K21
-        idx = idx * 441 + king21_by_king21_bucket(pos);
+        digits[NNUE_SFNN_ORDER_KING] = {441, king21_by_king21_bucket(pos)};
 #elif NNUE_SFNN_KING_BUCKET_TYPE == NNUE_SFNN_KING_BUCKET_TYPE_K29K29
-        idx = idx * 841 + king29_by_king29_bucket(pos);
+        digits[NNUE_SFNN_ORDER_KING] = {841, king29_by_king29_bucket(pos)};
+#else
+        digits[NNUE_SFNN_ORDER_KING] = {1, 0};
 #endif
 
 #if NNUE_SFNN_PROGRESS_BUCKETS != 1
-        idx = idx * NNUE_SFNN_PROGRESS_BUCKETS + progress_bucket(pos);
+        digits[NNUE_SFNN_ORDER_PROGRESS] = {NNUE_SFNN_PROGRESS_BUCKETS, progress_bucket(pos)};
+#else
+        digits[NNUE_SFNN_ORDER_PROGRESS] = {1, 0};
 #endif
 
-        // router系 (routerkpabs / routerft<R>ft<R>) は、hand/king/progressの合成が
-        // 終わった後、常に最後 (最下位桁) に合成する。
 #if NNUE_SFNN_ROUTER_MODE == NNUE_SFNN_ROUTER_MODE_KPABS
-        idx = idx * NNUE_SFNN_ROUTER_N + router_kpabs_bucket(pos);
+        digits[NNUE_SFNN_ORDER_ROUTER] = {NNUE_SFNN_ROUTER_N, router_kpabs_bucket(pos)};
 #elif NNUE_SFNN_ROUTER_MODE == NNUE_SFNN_ROUTER_MODE_FTFT
-        idx = idx * (NNUE_SFNN_ROUTER_N * NNUE_SFNN_ROUTER_N) + router_ftft_bucket(pos);
+        digits[NNUE_SFNN_ORDER_ROUTER] = {NNUE_SFNN_ROUTER_N * NNUE_SFNN_ROUTER_N,
+                                           router_ftft_bucket(pos)};
+#else
+        digits[NNUE_SFNN_ORDER_ROUTER] = {1, 0};
 #endif
+
+        int idx = 0;
+        for (const auto& digit : digits)
+            idx = idx * digit.count + digit.index;
 
         if (idx < 0) idx = 0;
-        if (idx >= kBaseBuckets) idx = kBaseBuckets - 1;
+        if (idx >= NNUE_SFNN_SELECTABLE_BUCKETS) idx = NNUE_SFNN_SELECTABLE_BUCKETS - 1;
+
+#if NNUE_SFNN_USE_SHARED_BUCKET
+        // wsb: 密index (0..NNUE_SFNN_SELECTABLE_BUCKETS-1) を、各外側ブロックに
+        // 共有バケット1個が挿入された実際の重み配列index (0..kLayerStacks-1) に
+        // 変換する (`kSharedBucketBlockSize` / `shared_bucket_index_for` 参照)。
+        const int outer_idx  = idx / NNUE_SFNN_SHARED_BUCKET_INNER;
+        const int inner_idx  = idx % NNUE_SFNN_SHARED_BUCKET_INNER;
+        idx                  = outer_idx * kSharedBucketBlockSize + inner_idx;
+#endif
+
         return idx;
 #endif
     }
@@ -877,7 +927,7 @@ namespace {
 #if defined(SFNNwoPSQT)
         const auto bucket = stack_index_for_nnue(pos);
 #if NNUE_SFNN_USE_SHARED_BUCKET
-        // 選択bucketと共有bucket (index kSharedBucketIndex) の中間活性を同時に
+        // 選択bucketと共有bucket (index shared_bucket_index_for(bucket)) の中間活性を同時に
         // 保持する必要があるため、`buffer`とは別にもう1つ確保する
         // (`PropagatePair`/`PropagatePairFromAccumulator`はこの2つに書き込む)。
         alignas(kCacheLineSize) char buffer2[Network::kBufferSize];
@@ -891,9 +941,9 @@ namespace {
         // `Network::PropagatePairFromAccumulator`のコメント参照)。
         const auto scores = networks().network[bucket].PropagatePairFromAccumulator(
             accumulator.accumulation, pos.side_to_move(),
-            networks().network[kSharedBucketIndex], buffer, buffer2);
+            networks().network[shared_bucket_index_for(bucket)], buffer, buffer2);
         const std::int32_t raw_output = scores.a + scores.b;
-        const int kScoreDivisor = FV_SCALE * 2;
+        const int kScoreDivisor = FV_SCALE;
 #else
         const auto output = networks().network[bucket].PropagateFromAccumulator(
             accumulator.accumulation, pos.side_to_move(), buffer);
@@ -911,9 +961,9 @@ namespace {
         // `Network::PropagatePair`のコメント参照。`Propagate`を2回呼ぶ場合と
         // 数値結果は完全に一致する)。
         const auto scores = networks().network[bucket].PropagatePair(
-            transformed_features, networks().network[kSharedBucketIndex], buffer, buffer2);
+            transformed_features, networks().network[shared_bucket_index_for(bucket)], buffer, buffer2);
         const std::int32_t raw_output = scores.a + scores.b;
-        const int kScoreDivisor = FV_SCALE * 2;
+        const int kScoreDivisor = FV_SCALE;
 #else
         const auto output = networks().network[bucket].Propagate(transformed_features, buffer);
         const std::int32_t raw_output = output[0];

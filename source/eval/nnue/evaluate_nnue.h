@@ -89,13 +89,50 @@
 #define NNUE_SFNN_ROUTER_N 0
 #endif
 
-// wsb (WithSharedBucket、`--bucket-mode`/アーキ名の末尾トークン `wsb`)。1のとき、
-// hand/king/progress/routerの合成バケットに加えて「常に選ばれる共有バケット」を
-// 1個追加する (`LayerStacks` にこの+1が既に反映済み、共有バケットのindexは常に
-// `kLayerStacks - 1`)。評価値は選択された1バケットと共有バケットの出力平均になる
-// (`evaluate_nnue.cpp` の `ComputeScore` 参照)。
+// バケットindexの合成順序 (桁の重み、0=最上位桁 .. 3=最下位桁、`order<letters>`
+// トークンで明示しない限りデフォルトの hand→king→progress→router、すなわち
+// 常に router が最下位桁)。`stack_index_for_nnue` がこの順序で digits[] を
+// 組み立てて合成する。
+#ifndef NNUE_SFNN_ORDER_HAND
+#define NNUE_SFNN_ORDER_HAND 0
+#endif
+#ifndef NNUE_SFNN_ORDER_KING
+#define NNUE_SFNN_ORDER_KING 1
+#endif
+#ifndef NNUE_SFNN_ORDER_PROGRESS
+#define NNUE_SFNN_ORDER_PROGRESS 2
+#endif
+#ifndef NNUE_SFNN_ORDER_ROUTER
+#define NNUE_SFNN_ORDER_ROUTER 3
+#endif
+
+// hand/king/progress/router の合成バケット数 (wsbの共有バケットを含まない)。
+#ifndef NNUE_SFNN_SELECTABLE_BUCKETS
+#define NNUE_SFNN_SELECTABLE_BUCKETS 1
+#endif
+
+// wsb (WithSharedBucket、`--bucket-mode`/アーキ名のどこかに置く `wsb` トークン)。
+// 1のとき、「wsb の直前のカテゴリ以降 (合成順序上、より下位の桁を全部含む
+// ブロック)」ごとに、そのブロックの選択バケットに加えて「常に選ばれる共有
+// バケット」を1個追加する。`LayerStacks` にはこの追加分が既に反映済み
+// (`= outer_buckets * (NNUE_SFNN_SHARED_BUCKET_INNER + 1)`、outer_buckets は
+// ブロックより外側のカテゴリの合成バケット数の積)。評価値は選択された1バケット
+// と、同じブロックの共有バケットの出力平均になる (`evaluate_nnue.cpp` の
+// `ComputeScore` / `stack_index_for_nnue` 参照)。0なら従来通り選択された
+// 1バケットのみを使う。
+//
+// ⚠️ 破壊的変更: 旧仕様 (wsb は常にバケット名の末尾のみ許可、常に
+// 「グローバルに1個だけの共有バケット」、共有バケットのindexは常に
+// `kLayerStacks - 1`) から意味が変わっている。旧仕様の挙動を再現したい場合は
+// wsb をバケット名の先頭に置く (`wsb_...`) こと。
 #ifndef NNUE_SFNN_USE_SHARED_BUCKET
 #define NNUE_SFNN_USE_SHARED_BUCKET 0
+#endif
+// wsb有効時の「ブロック」の選択バケット数 (共有バケット自体の+1を含まない)。
+// wsb無効時は未使用 (`NNUE_SFNN_SELECTABLE_BUCKETS` と同じ値が入る想定だが
+// 参照されない)。
+#ifndef NNUE_SFNN_SHARED_BUCKET_INNER
+#define NNUE_SFNN_SHARED_BUCKET_INNER 1
 #endif
 #endif
 
@@ -219,9 +256,21 @@ namespace RouterKPAbs {
 	constexpr std::uint32_t kHashValue =
 	    kSfnnBaseHashValue ^ kProgressHashPart ^ kRouterHashPart ^ kSharedBucketHashPart;
 	constexpr int kLayerStacks = LayerStacks;
-	// wsb有効時、共有バケット (常に評価される側) のindex。選択バケットの範囲は
-	// 0..kSharedBucketIndex-1 (`stack_index_for_nnue` 参照)。wsb無効時は未使用。
-	constexpr int kSharedBucketIndex = kLayerStacks - 1;
+#if NNUE_SFNN_USE_SHARED_BUCKET
+	// wsb有効時、「ブロック」(共有バケット1個+選択バケットNNUE_SFNN_SHARED_BUCKET_INNER個)
+	// のサイズ。ブロックは kLayerStacks の中に outer_buckets 個並んでおり、
+	// 各ブロックの末尾 (ブロック内の最後のindex) が、そのブロックに属する
+	// bucketがどれ選ばれても常に評価される共有バケット。
+	constexpr int kSharedBucketBlockSize = NNUE_SFNN_SHARED_BUCKET_INNER + 1;
+	// `stack_index_for_nnue` が返す実際のbucket (選択側) から、同じブロックの
+	// 共有バケットのindexを求める。旧仕様 (wsbは常にバケット名の末尾＝グローバルに
+	// 1個だけの共有バケット、outer_buckets==1) では、どのbucketに対しても常に
+	// 同じ値 (=kLayerStacks-1) を返す。
+	constexpr int shared_bucket_index_for(int bucket) {
+		const int outer_idx = bucket / kSharedBucketBlockSize;
+		return outer_idx * kSharedBucketBlockSize + NNUE_SFNN_SHARED_BUCKET_INNER;
+	}
+#endif
 #else
 	constexpr std::uint32_t kHashValue =
 	    FeatureTransformer::GetHashValue() ^ Network::GetHashValue();
