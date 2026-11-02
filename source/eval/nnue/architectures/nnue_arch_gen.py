@@ -849,6 +849,14 @@ if SFNN:
     elif enable_sparse_sfnn_accumulator_propagate:
         sfnn_accumulator_propagate_macro = "#define NNUE_HAS_SFNN_ACCUMULATOR_PROPAGATE"
 
+    if not sfnn_common_shard and hidden1_output_dims == 16 and int(layers[0]) % 128 == 0:
+        sfnn_accumulator_propagate_macro += """
+        #if defined(NNUE_SFNN_FUSED_FT)
+        #define NNUE_HAS_SFNN_ACCUMULATOR_PROPAGATE
+        #define NNUE_HAS_SFNN16_ACCUMULATOR_PROPAGATE
+        #endif
+        """
+
     structure_string = (
         "SFNN-1536"
         if input_feature == "halfkahm2"
@@ -858,10 +866,16 @@ if SFNN:
     )
 
     header += f"""
+        #if !defined(ENABLE_SFNN_16BIT_WEIGHT)
         {sfnn_accumulator_propagate_macro}
+        #endif
 
         using Fc0Layer = {fc_0_type};
+        #if defined(ENABLE_SFNN_16BIT_WEIGHT)
+        using NetworkBase = SfnnNetwork16<kInputDims, kHidden1Dims, kHidden2Dims, kUseShortcut>;
+        #else
         using NetworkBase = SfnnNetwork<Fc0Layer, kInputDims, kHidden1Dims, kHidden2Dims, kUseShortcut>;
+        #endif
 
         struct Network : NetworkBase {{
             static std::string GetStructureString() {{

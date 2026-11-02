@@ -9,6 +9,9 @@
 #if defined(EVAL_NNUE)
 
 #include "../nnue_common.h"
+#if defined(ENABLE_SFNN_16BIT_WEIGHT)
+#include "sfnn_network_16.h"
+#endif
 #include "../layers/affine_transform_common_shard_input_explicit.h"
 #include "../layers/affine_transform_explicit.h"
 #include "../layers/affine_transform_sparse_input_explicit.h"
@@ -270,7 +273,15 @@ struct SfnnNetwork {
 	                                           Color sideToMove,
 	                                           char* buffer) const {
 		auto& buf = *reinterpret_cast<Buffer*>(buffer);
+#if defined(NNUE_SFNN_FUSED_FT)
+		if constexpr (kHidden1OutputDims == 16
+		              && std::is_same_v<Fc0Layer, Layers::AffineTransformSparseInputExplicit<kInputDims, 16>>)
+			fc_0.template PropagateSfnn16FromAccumulator<kInputDims>(accumulation, sideToMove, buf.fc_0_out);
+		else
+			fc_0.template PropagateSfnnFromAccumulator<kInputDims>(accumulation, sideToMove, buf.fc_0_out);
+#else
 		fc_0.template PropagateSfnnFromAccumulator<kInputDims>(accumulation, sideToMove, buf.fc_0_out);
+#endif
 		return PropagateTail(buf);
 	}
 

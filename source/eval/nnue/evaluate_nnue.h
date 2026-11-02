@@ -141,29 +141,41 @@ class Position;
 
 namespace Eval::NNUE {
 
+#if defined(ENABLE_SFNN_16BIT_WEIGHT)
+#if !defined(SFNNwoPSQT)
+#error ENABLE_SFNN_16BIT_WEIGHT requires an SFNN architecture
+#endif
+	#define EvalFileDefaultName "nn16.bin"
+#else
 	#define EvalFileDefaultName "nn.bin"
+#endif
 
 #if defined(SFNNwoPSQT) && NNUE_SFNN_PROGRESS_BUCKETS != 1
 namespace Progress {
 
 	// SFNNのLayerStack選択に使う進行度計算パラメーター。
-	// nn.bin内ではFeatureTransformerの直後にこのセクションを置く。
+	// EvalDir/progress.bin: headerless little-endian doubles, without bias.
 	struct Parameters {
-		static constexpr int kProgressValueCount = 256;
 		static constexpr int kWeightCount = int(SQ_NB) * int(Eval::fe_end);
 
-		static constexpr std::uint32_t GetHashValue() {
-			return 0x6f50524fu; // "oPRO" : NNUE progress parameter section
-		}
-
 		Tools::Result ReadParameters(std::istream& stream);
-		bool WriteParameters(std::ostream& stream) const;
 
-		int Value0To255(const Position& pos) const;
+		// 旧形式 (nn.bin内にProgressセクションを埋め込んでいた形式) の読み込み。
+		// ストリームは、セクション先頭のhash(u32)の「次」にあること:
+		//   int32 bias_q16 , int32 weights_q16[SQ_NB][fe_end]
+		// 旧形式は進行度を0..255に量子化してからbucket化していたため、
+		// bucket境界も旧形式のものを使う (bucket数が2の冪なら新形式と一致する)。
+		static constexpr std::uint32_t kLegacySectionHash = 0x6f50524fu; // "oPRO"
+		Tools::Result ReadLegacyParameters(std::istream& stream);
+
+		std::int64_t SumQ16(const Position& pos) const;
 		int BucketIndex(const Position& pos, int bucket_count) const;
 
-		std::int32_t bias_q16_ = 0;
 		std::int32_t weights_q16_[SQ_NB][Eval::fe_end] = {};
+		// 旧形式のみ非0 (新形式のprogress.binにbiasはない)。
+		std::int32_t bias_q16_ = 0;
+		// trueなら旧形式 (進行度0..255の量子化) のbucket境界を使う。
+		bool legacy_thresholds_ = false;
 	};
 
 } // namespace Progress
@@ -232,11 +244,6 @@ namespace RouterKPAbs {
 	// 評価関数の構造のハッシュ値
 #if defined(SFNNwoPSQT)
 	constexpr std::uint32_t kSfnnBaseHashValue = 0x3c203b32u;
-#if NNUE_SFNN_PROGRESS_BUCKETS != 1
-	constexpr std::uint32_t kProgressHashPart = Progress::Parameters::GetHashValue();
-#else
-	constexpr std::uint32_t kProgressHashPart = 0u;
-#endif
 #if NNUE_SFNN_ROUTER_MODE == NNUE_SFNN_ROUTER_MODE_KPABS
 	constexpr std::uint32_t kRouterHashPart = RouterKPAbs::Parameters::GetHashValue();
 #elif NNUE_SFNN_ROUTER_MODE == NNUE_SFNN_ROUTER_MODE_FTFT
@@ -253,8 +260,9 @@ namespace RouterKPAbs {
 #else
 	constexpr std::uint32_t kSharedBucketHashPart = 0u;
 #endif
+	// progress.binはnn.binとは別ファイルなので、progressはhashに含めない。
 	constexpr std::uint32_t kHashValue =
-	    kSfnnBaseHashValue ^ kProgressHashPart ^ kRouterHashPart ^ kSharedBucketHashPart;
+	    kSfnnBaseHashValue ^ kRouterHashPart ^ kSharedBucketHashPart;
 	constexpr int kLayerStacks = LayerStacks;
 #if NNUE_SFNN_USE_SHARED_BUCKET
 	// wsb有効時、「ブロック」(共有バケット1個+選択バケットNNUE_SFNN_SHARED_BUCKET_INNER個)
@@ -316,7 +324,8 @@ namespace RouterKPAbs {
 	    std::uint32_t hash_value, const std::string& architecture);
 
 	// 評価関数パラメータを読み込む
-	Tools::Result ReadParameters(std::istream& stream);
+	// On a sidecar read failure, replace failed_file with its path.
+	Tools::Result ReadParameters(std::istream& stream, std::string* failed_file = nullptr);
 
 	// 評価関数パラメータを書き込む
 	bool WriteParameters(std::ostream& stream);
