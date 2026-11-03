@@ -291,16 +291,36 @@ struct SfnnNetwork {
 	// ([`PropagateTailPair`]) はこのTransform経由版と共通の融合を使う。
 	template <typename AccumulationType>
 	PairOutput PropagatePairFromAccumulator(const AccumulationType& accumulation,
-	                                        Color sideToMove,
-	                                        const SfnnNetwork& other,
-	                                        char* bufferA,
-	                                        char* bufferB) const {
-		auto& bufA = *reinterpret_cast<Buffer*>(bufferA);
-		auto& bufB = *reinterpret_cast<Buffer*>(bufferB);
-		fc_0.template PropagateSfnnFromAccumulator<kInputDims>(accumulation, sideToMove, bufA.fc_0_out);
-		other.fc_0.template PropagateSfnnFromAccumulator<kInputDims>(accumulation, sideToMove, bufB.fc_0_out);
-		return PropagateTailPair(bufA, other, bufB);
-	}
+												Color sideToMove,
+												const SfnnNetwork& other,
+												char* bufferA,
+												char* bufferB) const {
+				auto& bufA = *reinterpret_cast<Buffer*>(bufferA);
+				auto& bufB = *reinterpret_cast<Buffer*>(bufferB);
+
+	#if defined(NNUE_SFNN_FUSED_FT)
+				if constexpr (kHidden1OutputDims == 16
+								&& std::is_same_v<Fc0Layer, Layers::AffineTransformSparseInputExplicit<kInputDims, 16>>) {
+						fc_0.template PropagateSfnn16FromAccumulator<kInputDims>(
+							accumulation, sideToMove, bufA.fc_0_out);
+						other.fc_0.template PropagateSfnn16FromAccumulator<kInputDims>(
+							accumulation, sideToMove, bufB.fc_0_out);
+				}
+				else {
+						fc_0.template PropagateSfnnFromAccumulator<kInputDims>(
+							accumulation, sideToMove, bufA.fc_0_out);
+						other.fc_0.template PropagateSfnnFromAccumulator<kInputDims>(
+							accumulation, sideToMove, bufB.fc_0_out);
+				}
+	#else
+				fc_0.template PropagateSfnnFromAccumulator<kInputDims>(
+					accumulation, sideToMove, bufA.fc_0_out);
+				other.fc_0.template PropagateSfnnFromAccumulator<kInputDims>(
+					accumulation, sideToMove, bufB.fc_0_out);
+	#endif
+
+				return PropagateTailPair(bufA, other, bufB);
+		}
 #endif
 };
 
